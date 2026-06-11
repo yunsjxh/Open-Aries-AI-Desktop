@@ -30,7 +30,13 @@ extern "C" const char _binary_WebView2Loader_dll_start[];
 extern "C" const char _binary_WebView2Loader_dll_end[];
 extern "C" const char _binary_WebView2Loader_dll_size[];
 
+// Embedded MCP server via objcopy (from demo/mcp_server.exe)
+extern "C" const char _binary_demo_mcp_server_exe_start[];
+extern "C" const char _binary_demo_mcp_server_exe_end[];
+extern "C" const char _binary_demo_mcp_server_exe_size[];
+
 static void ensureDll(const wchar_t* dllPath);
+static void ensureMcpServer();
 
 #define WINDOW_CLASS L"OpenAriesAI"
 #define BORDER_WIDTH  12
@@ -651,6 +657,23 @@ static void ensureDll(const wchar_t* dllPath) {
     if (hf == INVALID_HANDLE_VALUE) return;
     DWORD written = 0;
     WriteFile(hf, _binary_WebView2Loader_dll_start, (DWORD)sz, &written, nullptr);
+    CloseHandle(hf);
+}
+
+// Extract embedded MCP server to temp file if not present
+static std::wstring g_mcpServerPath;
+static void ensureMcpServer() {
+    if (!g_mcpServerPath.empty() && GetFileAttributesW(g_mcpServerPath.c_str()) != INVALID_FILE_ATTRIBUTES) return;
+    wchar_t tmp[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    g_mcpServerPath = std::wstring(tmp) + L"mcp_server.exe";
+    if (GetFileAttributesW(g_mcpServerPath.c_str()) != INVALID_FILE_ATTRIBUTES) return;
+    size_t sz = (size_t)_binary_demo_mcp_server_exe_size;
+    if (sz == 0 || sz > 50 * 1024 * 1024) return; // sanity check
+    HANDLE hf = CreateFileW(g_mcpServerPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE) { g_mcpServerPath.clear(); return; }
+    DWORD written = 0;
+    WriteFile(hf, _binary_demo_mcp_server_exe_start, (DWORD)sz, &written, nullptr);
     CloseHandle(hf);
 }
 
@@ -3464,11 +3487,12 @@ public:
                 int n = g_mcpRegistry.loadFromJsonFile(cfgPath, g_toolRegistry);
                 LOG("MCP: loaded %d tools from config", n);
 
-                // Fallback: if no config, auto-discover bundled server
+                // Fallback: if no config, auto-discover embedded server
                 if (n == 0) {
-                    std::wstring mcpPath = std::wstring(exeDir) + L"demo\\mcp_server.exe";
-                    if (GetFileAttributesW(mcpPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                        n = g_mcpRegistry.addServer(mcpPath, "desktop", g_toolRegistry);
+                    ensureMcpServer();
+                    if (!g_mcpServerPath.empty() &&
+                        GetFileAttributesW(g_mcpServerPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                        n = g_mcpRegistry.addServer(g_mcpServerPath, "desktop", g_toolRegistry);
                         LOG("MCP auto-discover 'desktop': %d tools", n);
                     }
                 }

@@ -150,12 +150,17 @@ objcopy --input-format binary --output-format pe-x86-64 \
     --binary-architecture i386:x86-64 \
     WebView2Loader.dll webview2_dll.o
 
-# 3. 生成内嵌 HTML（仅当 界面.html 有修改时）
+# 3. 嵌入 MCP 服务器（demo/mcp_server.exe）
+objcopy --input-format binary --output-format pe-x86-64 \
+    --binary-architecture i386:x86-64 \
+    demo/mcp_server.exe mcp_server_exe.o
+
+# 4. 生成内嵌 HTML（仅当 界面.html 有修改时）
 python gen_ui_html.py
 
-# 4. 静态编译链接
+# 5. 静态编译链接
 g++ -O2 -std=c++17 -static-libgcc -static-libstdc++ \
-    -Iinclude main.cpp resource.o webview2_dll.o \
+    -Iinclude main.cpp resource.o webview2_dll.o mcp_server_exe.o \
     -o "Open Aries AI.exe" \
     -lgdiplus -lcomctl32 -ldwmapi -lole32 -luuid \
     -lshlwapi -lshell32 -lwininet -mwindows
@@ -223,7 +228,7 @@ g++ -O2 -std=c++17 -static-libgcc -static-libstdc++ \
 │
 └── demo/
     ├── mcp_server.cpp           # MCP 桌面控制服务器（DXGI 桌面复制）
-    ├── mcp_server.exe           # 编译好的 MCP 服务器
+    ├── mcp_server.cpp           # MCP 桌面控制服务器源码（DXGI 桌面复制）
     ├── preview.cpp              # 屏幕预览工具源码
     └── build.bat                # demo 构建脚本
 │
