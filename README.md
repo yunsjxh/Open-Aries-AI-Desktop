@@ -53,7 +53,7 @@ Open Aries AI Desktop 是一款为 Windows 设计的原生桌面 AI 助手。不
 
 - **原生桌面** — 单文件 exe，双击即用，WebView2 DLL 内嵌，不依赖外部 Runtime
 - **多模型兼容** — OpenAI / DeepSeek / SiliconFlow / MiniMax 等全部 OpenAI 格式 API
-- **Agent 自主调用** — AI 可自主读写文件、执行 PowerShell、管理进程、截取窗口等 16 个系统工具
+- **Agent 自主调用** — AI 可自主读写文件、执行 PowerShell、管理进程、截取窗口/桌面等 20 个系统工具
 - **MCP 协议扩展** — 支持 Model Context Protocol stdio 传输，接入外部工具服务器
 - **流式 SSE 输出** — 实时显示 AI 推理过程和回复，支持 `<think>` 思考链展示
 - **视觉识别** — 截图分析，多模态请求（需视觉模型支持）
@@ -65,7 +65,7 @@ Open Aries AI Desktop 是一款为 Windows 设计的原生桌面 AI 助手。不
 - **路径安全** — 文件操作白名单 + 黑名单校验，防路径遍历
 - **自适应窗口** — 四边四角自由拖动调整大小，最小宽度 480px
 
-### Agent 工具（16 个）
+### Agent 工具（20 个）
 
 | 工具 | 功能 | 需确认 |
 |------|------|--------|
@@ -85,6 +85,10 @@ Open Aries AI Desktop 是一款为 Windows 设计的原生桌面 AI 助手。不
 | `GET_FOREGROUND_WINDOW` | 获取前台窗口信息 | — |
 | `LIST_WINDOWS` | 列出所有可见窗口 | — |
 | `CAPTURE_WINDOW` | 截取窗口画面 | — |
+| `CAPTURE_DESKTOP` | 截取指定显示器画面（DXGI） | — |
+| `GET_DISPLAYS` | 获取所有显示器信息 | — |
+| `CLICK_AT` | 在屏幕坐标点击 | — |
+| `MOVE_WINDOW_TO_DISPLAY` | 移动窗口到指定显示器 | — |
 
 ---
 
@@ -150,20 +154,15 @@ objcopy --input-format binary --output-format pe-x86-64 \
     --binary-architecture i386:x86-64 \
     WebView2Loader.dll webview2_dll.o
 
-# 3. 嵌入 MCP 服务器（demo/mcp_server.exe）
-objcopy --input-format binary --output-format pe-x86-64 \
-    --binary-architecture i386:x86-64 \
-    demo/mcp_server.exe mcp_server_exe.o
-
-# 4. 生成内嵌 HTML（仅当 界面.html 有修改时）
+# 3. 生成内嵌 HTML（仅当 界面.html 有修改时）
 python gen_ui_html.py
 
-# 5. 静态编译链接
+# 4. 静态编译链接
 g++ -O2 -std=c++17 -static-libgcc -static-libstdc++ \
-    -Iinclude main.cpp resource.o webview2_dll.o mcp_server_exe.o \
+    -Iinclude main.cpp resource.o webview2_dll.o \
     -o "Open Aries AI.exe" \
     -lgdiplus -lcomctl32 -ldwmapi -lole32 -luuid \
-    -lshlwapi -lshell32 -lwininet -mwindows
+    -lshlwapi -lshell32 -lwininet -ld3d11 -ldxgi -mwindows
 ```
 
 编译完成后，当前目录会生成 `Open Aries AI.exe`，可直接运行。
@@ -172,16 +171,17 @@ g++ -O2 -std=c++17 -static-libgcc -static-libstdc++ \
 
 ## 使用指南
 
-### MCP 服务器
+### MCP 服务器（可选扩展）
 
-`mcp_servers.json`（设置页图形化管理，或手动编辑）：
+桌面截图、显示器控制等能力已内置为主程序工具，无需额外 MCP 服务器。
+如需接入外部工具服务器，可在 `mcp_servers.json` 中配置（设置页图形化管理，或手动编辑）：
 
 ```json
 {
   "servers": [
     {
-      "label": "desktop-control",
-      "command": "demo\\mcp_server.exe"
+      "label": "my-server",
+      "command": "C:\\path\\to\\server.exe"
     }
   ]
 }
@@ -216,7 +216,7 @@ g++ -O2 -std=c++17 -static-libgcc -static-libstdc++ \
 ├── app_icon.ico / .png         # 应用图标
 ├── WebView2Loader.dll          # WebView2 运行时（构建时嵌入 exe）
 ├── config.example.txt          # 配置文件模板
-├── mcp_servers.json            # MCP 服务器配置
+├── mcp_servers.json            # MCP 服务器配置（可选外部扩展）
 │
 ├── include/
 │   ├── ai_provider.hpp                # AI Provider 抽象接口
@@ -225,12 +225,6 @@ g++ -O2 -std=c++17 -static-libgcc -static-libstdc++ \
 │   ├── tool_system.hpp               # 工具注册/执行/截断框架
 │   ├── permission_system.hpp         # 权限规则引擎（allow/deny/ask + 通配符）
 │   └── mcp_client.hpp                # MCP 协议客户端（stdio 传输）
-│
-└── demo/
-    ├── mcp_server.cpp           # MCP 桌面控制服务器（DXGI 桌面复制）
-    ├── mcp_server.cpp           # MCP 桌面控制服务器源码（DXGI 桌面复制）
-    ├── preview.cpp              # 屏幕预览工具源码
-    └── build.bat                # demo 构建脚本
 │
 └── legacy/                      # 旧版 Open Aries AI 完整代码（CLI + Web）
     ├── aries_agent.cpp          # 旧版 CLI 主程序

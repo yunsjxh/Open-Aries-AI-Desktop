@@ -21,6 +21,8 @@
 #include <fstream>
 #include <gdiplus.h>
 #include <objidl.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
 #include "WebView2.h"
 #include "ui_html.h"
 #pragma comment(lib, "gdiplus.lib")
@@ -30,13 +32,7 @@ extern "C" const char _binary_WebView2Loader_dll_start[];
 extern "C" const char _binary_WebView2Loader_dll_end[];
 extern "C" const char _binary_WebView2Loader_dll_size[];
 
-// Embedded MCP server via objcopy (from demo/mcp_server.exe)
-extern "C" const char _binary_demo_mcp_server_exe_start[];
-extern "C" const char _binary_demo_mcp_server_exe_end[];
-extern "C" const char _binary_demo_mcp_server_exe_size[];
-
 static void ensureDll(const wchar_t* dllPath);
-static void ensureMcpServer();
 
 #define WINDOW_CLASS L"OpenAriesAI"
 #define BORDER_WIDTH  12
@@ -657,23 +653,6 @@ static void ensureDll(const wchar_t* dllPath) {
     if (hf == INVALID_HANDLE_VALUE) return;
     DWORD written = 0;
     WriteFile(hf, _binary_WebView2Loader_dll_start, (DWORD)sz, &written, nullptr);
-    CloseHandle(hf);
-}
-
-// Extract embedded MCP server to temp file if not present
-static std::wstring g_mcpServerPath;
-static void ensureMcpServer() {
-    if (!g_mcpServerPath.empty() && GetFileAttributesW(g_mcpServerPath.c_str()) != INVALID_FILE_ATTRIBUTES) return;
-    wchar_t tmp[MAX_PATH];
-    GetTempPathW(MAX_PATH, tmp);
-    g_mcpServerPath = std::wstring(tmp) + L"mcp_server.exe";
-    if (GetFileAttributesW(g_mcpServerPath.c_str()) != INVALID_FILE_ATTRIBUTES) return;
-    size_t sz = (size_t)_binary_demo_mcp_server_exe_size;
-    if (sz == 0 || sz > 50 * 1024 * 1024) return; // sanity check
-    HANDLE hf = CreateFileW(g_mcpServerPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hf == INVALID_HANDLE_VALUE) { g_mcpServerPath.clear(); return; }
-    DWORD written = 0;
-    WriteFile(hf, _binary_demo_mcp_server_exe_start, (DWORD)sz, &written, nullptr);
     CloseHandle(hf);
 }
 
@@ -2927,6 +2906,229 @@ std::string base64Encode(const unsigned char* data, size_t len) {
     return out;
 }
 
+// ============================================================================
+// DXGI Desktop Duplication capture (ported from demo/mcp_server.cpp)
+// ============================================================================
+std::string captureDesktopToBase64(int displayIndex) {
+    ID3D11Device* d3dDevice = nullptr;
+    ID3D11DeviceContext* d3dContext = nullptr;
+    D3D_FEATURE_LEVEL fl;
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+                                   nullptr, 0, D3D11_SDK_VERSION,
+                                   &d3dDevice, &fl, &d3dContext);
+    if (FAILED(hr)) return "";
+
+    IDXGIDevice* dxgiDevice = nullptr;
+    hr = d3dDevice->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgiDevice);
+    if (FAILED(hr)) { d3dDevice->Release(); d3dContext->Release(); return ""; }
+
+    IDXGIAdapter* adapter = nullptr;
+    hr = dxgiDevice->GetAdapter(&adapter);
+    dxgiDevice->Release();
+    if (FAILED(hr)) { d3dDevice->Release(); d3dContext->Release(); return ""; }
+
+    std::vector<IDXGIOutput*> outputs;
+    UINT idx = 0;
+    IDXGIOutput* output = nullptr;
+    while (adapter->EnumOutputs(idx, &output) != DXGI_ERROR_NOT_FOUND) {
+        DXGI_OUTPUT_DESC desc;
+        if (SUCCEEDED(output->GetDesc(&desc)) && desc.AttachedToDesktop) {
+            outputs.push_back(output);
+        } else {
+            output->Release();
+        }
+        idx++;
+    }
+    adapter->Release();
+
+    if (displayIndex < 0 || displayIndex >= (int)outputs.size()) {
+        for (auto* o : outputs) o->Release();
+        d3dDevice->Release();
+        d3dContext->Release();
+        return "";
+    }
+
+    IDXGIOutput* targetOutput = outputs[displayIndex];
+    for (size_t j = 0; j < outputs.size(); j++) {
+        if (outputs[j] != targetOutput) outputs[j]->Release();
+    }
+
+    IDXGIOutput1* output1 = nullptr;
+    hr = targetOutput->QueryInterface(__uuidof(IDXGIOutput1), (void**)&output1);
+    targetOutput->Release();
+    if (FAILED(hr)) { d3dDevice->Release(); d3dContext->Release(); return ""; }
+
+    IDXGIOutputDuplication* dup = nullptr;
+    hr = output1->DuplicateOutput(d3dDevice, &dup);
+    output1->Release();
+    if (FAILED(hr)) { d3dDevice->Release(); d3dContext->Release(); return ""; }
+
+    IDXGIResource* desktopResource = nullptr;
+    DXGI_OUTDUPL_FRAME_INFO frameInfo;
+    hr = dup->AcquireNextFrame(3000, &frameInfo, &desktopResource);
+    if (FAILED(hr)) { dup->Release(); d3dDevice->Release(); d3dContext->Release(); return ""; }
+
+    ID3D11Texture2D* desktopTexture = nullptr;
+    hr = desktopResource->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&desktopTexture);
+    desktopResource->Release();
+    if (FAILED(hr)) { dup->ReleaseFrame(); dup->Release(); d3dDevice->Release(); d3dContext->Release(); return ""; }
+
+    D3D11_TEXTURE2D_DESC stagingDesc = {};
+    desktopTexture->GetDesc(&stagingDesc);
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.BindFlags = 0;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    stagingDesc.MiscFlags = 0;
+
+    ID3D11Texture2D* stagingTexture = nullptr;
+    hr = d3dDevice->CreateTexture2D(&stagingDesc, nullptr, &stagingTexture);
+    if (FAILED(hr)) { desktopTexture->Release(); dup->ReleaseFrame(); dup->Release(); d3dDevice->Release(); d3dContext->Release(); return ""; }
+
+    d3dContext->CopyResource(stagingTexture, desktopTexture);
+    desktopTexture->Release();
+
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    hr = d3dContext->Map(stagingTexture, 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) { stagingTexture->Release(); dup->ReleaseFrame(); dup->Release(); d3dDevice->Release(); d3dContext->Release(); return ""; }
+
+    ensureGdiplus();
+    Gdiplus::Bitmap bitmap(stagingDesc.Width, stagingDesc.Height, mapped.RowPitch, PixelFormat32bppARGB, (BYTE*)mapped.pData);
+
+    CLSID pngClsid;
+    if (!getPngEncoderClsid(pngClsid)) {
+        d3dContext->Unmap(stagingTexture, 0);
+        stagingTexture->Release(); dup->ReleaseFrame(); dup->Release(); d3dDevice->Release(); d3dContext->Release();
+        return "";
+    }
+
+    IStream* pStream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(NULL, TRUE, &pStream))) {
+        d3dContext->Unmap(stagingTexture, 0);
+        stagingTexture->Release(); dup->ReleaseFrame(); dup->Release(); d3dDevice->Release(); d3dContext->Release();
+        return "";
+    }
+
+    if (bitmap.Save(pStream, &pngClsid, NULL) != Gdiplus::Ok) {
+        pStream->Release();
+        d3dContext->Unmap(stagingTexture, 0);
+        stagingTexture->Release(); dup->ReleaseFrame(); dup->Release(); d3dDevice->Release(); d3dContext->Release();
+        return "";
+    }
+
+    STATSTG stat;
+    if (FAILED(pStream->Stat(&stat, STATFLAG_NONAME))) {
+        pStream->Release();
+        d3dContext->Unmap(stagingTexture, 0);
+        stagingTexture->Release(); dup->ReleaseFrame(); dup->Release(); d3dDevice->Release(); d3dContext->Release();
+        return "";
+    }
+
+    ULONG size = stat.cbSize.QuadPart;
+    LARGE_INTEGER li = {};
+    pStream->Seek(li, STREAM_SEEK_SET, NULL);
+    std::string pngBytes(size, 0);
+    ULONG bytesRead = 0;
+    pStream->Read(&pngBytes[0], size, &bytesRead);
+    pStream->Release();
+
+    d3dContext->Unmap(stagingTexture, 0);
+    stagingTexture->Release();
+    dup->ReleaseFrame();
+    dup->Release();
+    d3dDevice->Release();
+    d3dContext->Release();
+
+    if (bytesRead != size) return "";
+    return base64Encode((const unsigned char*)pngBytes.data(), pngBytes.size());
+}
+
+// ============================================================================
+// Display enumeration (EnumDisplayMonitors)
+// ============================================================================
+struct DisplayInfo {
+    RECT rect;
+    bool primary;
+    int index;
+};
+static std::vector<DisplayInfo> g_enumDisplays;
+
+static BOOL CALLBACK enumMonitorsProc(HMONITOR hMon, HDC, LPRECT, LPARAM) {
+    MONITORINFO mi = {sizeof(mi)};
+    GetMonitorInfoA(hMon, &mi);
+    DisplayInfo d;
+    d.rect = mi.rcMonitor;
+    d.primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
+    d.index = (int)g_enumDisplays.size();
+    g_enumDisplays.push_back(d);
+    return TRUE;
+}
+
+std::string getDisplaysJson() {
+    g_enumDisplays.clear();
+    EnumDisplayMonitors(nullptr, nullptr, enumMonitorsProc, 0);
+    std::ostringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < g_enumDisplays.size(); i++) {
+        if (i) ss << ",";
+        auto& d = g_enumDisplays[i];
+        ss << "{\"index\":" << d.index
+           << ",\"primary\":" << (d.primary ? "true" : "false")
+           << ",\"left\":" << d.rect.left
+           << ",\"top\":" << d.rect.top
+           << ",\"width\":" << (d.rect.right - d.rect.left)
+           << ",\"height\":" << (d.rect.bottom - d.rect.top) << "}";
+    }
+    ss << "]";
+    return ss.str();
+}
+
+RECT getDisplayRect(int index) {
+    g_enumDisplays.clear();
+    EnumDisplayMonitors(nullptr, nullptr, enumMonitorsProc, 0);
+    if (index < 0 || index >= (int)g_enumDisplays.size())
+        return {0, 0, 0, 0};
+    return g_enumDisplays[index].rect;
+}
+
+// ============================================================================
+// Mouse click helper
+// ============================================================================
+void clickAt(int x, int y) {
+    SetCursorPos(x, y);
+    Sleep(30);
+    INPUT down = {};
+    down.type = INPUT_MOUSE;
+    down.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    SendInput(1, &down, sizeof(INPUT));
+    Sleep(10);
+    INPUT up = {};
+    up.type = INPUT_MOUSE;
+    up.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    SendInput(1, &up, sizeof(INPUT));
+}
+
+// ============================================================================
+// Move window to target rect
+// ============================================================================
+void moveWindowToRect(HWND hwnd, const RECT& target) {
+    int tw = target.right - target.left;
+    int th = target.bottom - target.top;
+    WINDOWPLACEMENT wp = {sizeof(wp)};
+    GetWindowPlacement(hwnd, &wp);
+    if (wp.showCmd == SW_SHOWMINIMIZED || wp.showCmd == SW_SHOWMAXIMIZED)
+        ShowWindow(hwnd, SW_RESTORE);
+    Sleep(100);
+    RECT& cur = wp.rcNormalPosition;
+    int cw = cur.right - cur.left;
+    int ch = cur.bottom - cur.top;
+    if (cw <= 0 || ch <= 0) { cw = 800; ch = 600; }
+    int nw = cw < tw ? cw : tw;
+    int nh = ch < th ? ch : th;
+    int nx = target.left + (tw - nw) / 2;
+    int ny = target.top + (th - nh) / 2;
+    SetWindowPos(hwnd, nullptr, nx, ny, nw, nh, SWP_NOZORDER | SWP_SHOWWINDOW);
+}
+
 std::string executePowerShell(const std::string& script) {
     // Build script with encoding fix
     std::string fullScript = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n" + script;
@@ -3401,6 +3603,74 @@ static void registerAllTools() {
         }
     );
 
+    // -- CAPTURE_DESKTOP --
+    g_toolRegistry.registerTool(
+        {"CAPTURE_DESKTOP", "Capture a screenshot of an entire display (monitor) using DXGI desktop duplication.",
+         {{"display_index", P::Number, "Display index (0=primary, 1=second, etc.)", false}}},
+        [](const std::string& argsJson, ToolContext& ctx) -> ToolResult {
+            int idx = jsonGetInt(argsJson, "display_index", 0);
+            std::string b64 = captureDesktopToBase64(idx);
+            if (b64.empty())
+                return ToolResult::error("截图失败", "无法捕获显示器 " + std::to_string(idx) + "，请检查索引是否有效或显卡驱动");
+            {
+                std::lock_guard<std::mutex> lk(g_sessionStateMutex);
+                g_sessionState[utf8_to_ws(ctx.sessionId)].pendingScreenshotB64 = b64;
+            }
+            {
+                std::lock_guard<std::mutex> lk(g_streamMutex);
+                g_streamQueue.push(L"__IMAGE__桌面截图\x1f" + utf8_to_ws(b64));
+                PostMessageW(g_hwnd, WM_AI_DELTA, 0, 0);
+            }
+            return ToolResult::ok("桌面截图完成", "显示器 " + std::to_string(idx) + " 截图已捕获 (" + std::to_string(b64.length()) + " 字符)");
+        }
+    );
+
+    // -- GET_DISPLAYS --
+    g_toolRegistry.registerTool(
+        {"GET_DISPLAYS", "Get information about all connected displays (index, position, size, primary).", {}},
+        [](const std::string& argsJson, ToolContext& ctx) -> ToolResult {
+            return ToolResult::ok("显示器列表", getDisplaysJson());
+        }
+    );
+
+    // -- CLICK_AT --
+    g_toolRegistry.registerTool(
+        {"CLICK_AT", "Click at absolute screen coordinates.",
+         {{"x", P::Number, "Absolute X coordinate", true},
+          {"y", P::Number, "Absolute Y coordinate", true},
+          {"display_index", P::Number, "Display index (0=primary, default 0)", false}}},
+        [](const std::string& argsJson, ToolContext& ctx) -> ToolResult {
+            int x = jsonGetInt(argsJson, "x", 0);
+            int y = jsonGetInt(argsJson, "y", 0);
+            int idx = jsonGetInt(argsJson, "display_index", 0);
+            RECT r = getDisplayRect(idx);
+            int absX = r.left + x;
+            int absY = r.top + y;
+            clickAt(absX, absY);
+            return ToolResult::ok("点击完成", "已在 (" + std::to_string(absX) + ", " + std::to_string(absY) + ") 执行点击");
+        }
+    );
+
+    // -- MOVE_WINDOW_TO_DISPLAY --
+    g_toolRegistry.registerTool(
+        {"MOVE_WINDOW_TO_DISPLAY", "Move a window (matched by partial title) to a specific display.",
+         {{"name", P::String, "Window title (partial match)", true},
+          {"display_index", P::Number, "Target display index (0=primary, default 1)", false}}},
+        [](const std::string& argsJson, ToolContext& ctx) -> ToolResult {
+            std::string name = jsonGetString(argsJson, "name");
+            int idx = jsonGetInt(argsJson, "display_index", 1);
+            FindWndCtx fctx = { name, nullptr };
+            EnumWindows(findWndCb, (LPARAM)&fctx);
+            if (!fctx.hwnd)
+                return ToolResult::error("未找到窗口", name);
+            RECT r = getDisplayRect(idx);
+            if (r.right == 0 && r.bottom == 0)
+                return ToolResult::error("显示器无效", "索引 " + std::to_string(idx));
+            moveWindowToRect(fctx.hwnd, r);
+            return ToolResult::ok("移动完成", "已将窗口移动到显示器 " + std::to_string(idx));
+        }
+    );
+
     LOG("ToolRegistry: %zu tools registered", g_toolRegistry.count());
 }
 
@@ -3487,15 +3757,8 @@ public:
                 int n = g_mcpRegistry.loadFromJsonFile(cfgPath, g_toolRegistry);
                 LOG("MCP: loaded %d tools from config", n);
 
-                // Fallback: if no config, auto-discover embedded server
-                if (n == 0) {
-                    ensureMcpServer();
-                    if (!g_mcpServerPath.empty() &&
-                        GetFileAttributesW(g_mcpServerPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                        n = g_mcpRegistry.addServer(g_mcpServerPath, "desktop", g_toolRegistry);
-                        LOG("MCP auto-discover 'desktop': %d tools", n);
-                    }
-                }
+                // No bundled MCP server — desktop capture is now a built-in tool (CAPTURE_DESKTOP)
+                (void)n;
 
                 LOG("MCP: %zu servers, %zu tools total",
                     g_mcpRegistry.serverCount(), g_toolRegistry.count());
