@@ -2909,7 +2909,7 @@ std::string base64Encode(const unsigned char* data, size_t len) {
 // ============================================================================
 // DXGI Desktop Duplication capture (ported from demo/mcp_server.cpp)
 // ============================================================================
-std::string captureDesktopToBase64(int displayIndex) {
+std::string captureDesktopToBase64() {
     ID3D11Device* d3dDevice = nullptr;
     ID3D11DeviceContext* d3dContext = nullptr;
     D3D_FEATURE_LEVEL fl;
@@ -2928,12 +2928,31 @@ std::string captureDesktopToBase64(int displayIndex) {
     if (FAILED(hr)) { d3dDevice->Release(); d3dContext->Release(); return ""; }
 
     std::vector<IDXGIOutput*> outputs;
+    IDXGIOutput* targetOutput = nullptr;
     UINT idx = 0;
     IDXGIOutput* output = nullptr;
     while (adapter->EnumOutputs(idx, &output) != DXGI_ERROR_NOT_FOUND) {
         DXGI_OUTPUT_DESC desc;
         if (SUCCEEDED(output->GetDesc(&desc)) && desc.AttachedToDesktop) {
-            outputs.push_back(output);
+            // Detect usbmmidd virtual display by matching DXGI output name
+            bool isUsbmmidd = false;
+            DISPLAY_DEVICEW dd = {sizeof(dd)};
+            int devIdx = 0;
+            while (EnumDisplayDevicesW(desc.DeviceName, devIdx, &dd, 0)) {
+                std::wstring id(dd.DeviceID);
+                std::wstring str(dd.DeviceString);
+                if (id.find(L"usbmmidd") != std::wstring::npos ||
+                    str.find(L"USB Mobile Monitor") != std::wstring::npos) {
+                    isUsbmmidd = true;
+                    break;
+                }
+                devIdx++;
+            }
+            if (isUsbmmidd) {
+                targetOutput = output;
+            } else {
+                outputs.push_back(output);
+            }
         } else {
             output->Release();
         }
@@ -2941,17 +2960,18 @@ std::string captureDesktopToBase64(int displayIndex) {
     }
     adapter->Release();
 
-    if (displayIndex < 0 || displayIndex >= (int)outputs.size()) {
-        for (auto* o : outputs) o->Release();
-        d3dDevice->Release();
-        d3dContext->Release();
-        return "";
+    // Fallback: second display, then first
+    if (!targetOutput) {
+        if (outputs.size() > 1) {
+            targetOutput = outputs[1];
+        } else if (!outputs.empty()) {
+            targetOutput = outputs[0];
+        }
     }
-
-    IDXGIOutput* targetOutput = outputs[displayIndex];
-    for (size_t j = 0; j < outputs.size(); j++) {
-        if (outputs[j] != targetOutput) outputs[j]->Release();
+    for (auto* o : outputs) {
+        if (o != targetOutput) o->Release();
     }
+    if (!targetOutput) { d3dDevice->Release(); d3dContext->Release(); return ""; }
 
     IDXGIOutput1* output1 = nullptr;
     hr = targetOutput->QueryInterface(__uuidof(IDXGIOutput1), (void**)&output1);
@@ -3061,25 +3081,6 @@ static BOOL CALLBACK enumMonitorsProc(HMONITOR hMon, HDC, LPRECT, LPARAM) {
     d.index = (int)g_enumDisplays.size();
     g_enumDisplays.push_back(d);
     return TRUE;
-}
-
-std::string getDisplaysJson() {
-    g_enumDisplays.clear();
-    EnumDisplayMonitors(nullptr, nullptr, enumMonitorsProc, 0);
-    std::ostringstream ss;
-    ss << "[";
-    for (size_t i = 0; i < g_enumDisplays.size(); i++) {
-        if (i) ss << ",";
-        auto& d = g_enumDisplays[i];
-        ss << "{\"index\":" << d.index
-           << ",\"primary\":" << (d.primary ? "true" : "false")
-           << ",\"left\":" << d.rect.left
-           << ",\"top\":" << d.rect.top
-           << ",\"width\":" << (d.rect.right - d.rect.left)
-           << ",\"height\":" << (d.rect.bottom - d.rect.top) << "}";
-    }
-    ss << "]";
-    return ss.str();
 }
 
 RECT getDisplayRect(int index) {
@@ -3605,13 +3606,12 @@ static void registerAllTools() {
 
     // -- CAPTURE_DESKTOP --
     g_toolRegistry.registerTool(
-        {"CAPTURE_DESKTOP", "Capture a screenshot of an entire display (monitor) using DXGI desktop duplication.",
-         {{"display_index", P::Number, "Display index (0=primary, 1=second, etc.)", false}}},
+        {"CAPTURE_DESKTOP", "Capture a screenshot of the virtual display (usbmmidd_v2) using DXGI desktop duplication. "
+         "Automatically detects the usbmmidd monitor; falls back to the second display if not found.", {}},
         [](const std::string& argsJson, ToolContext& ctx) -> ToolResult {
-            int idx = jsonGetInt(argsJson, "display_index", 0);
-            std::string b64 = captureDesktopToBase64(idx);
+            std::string b64 = captureDesktopToBase64();
             if (b64.empty())
-                return ToolResult::error("截图失败", "无法捕获显示器 " + std::to_string(idx) + "，请检查索引是否有效或显卡驱动");
+                return ToolResult::error("截图失败", "无法捕获虚拟显示器，请检查 usbmmidd_v2 是否已安装或显卡驱动是否正常");
             {
                 std::lock_guard<std::mutex> lk(g_sessionStateMutex);
                 g_sessionState[utf8_to_ws(ctx.sessionId)].pendingScreenshotB64 = b64;
@@ -3621,15 +3621,7 @@ static void registerAllTools() {
                 g_streamQueue.push(L"__IMAGE__桌面截图\x1f" + utf8_to_ws(b64));
                 PostMessageW(g_hwnd, WM_AI_DELTA, 0, 0);
             }
-            return ToolResult::ok("桌面截图完成", "显示器 " + std::to_string(idx) + " 截图已捕获 (" + std::to_string(b64.length()) + " 字符)");
-        }
-    );
-
-    // -- GET_DISPLAYS --
-    g_toolRegistry.registerTool(
-        {"GET_DISPLAYS", "Get information about all connected displays (index, position, size, primary).", {}},
-        [](const std::string& argsJson, ToolContext& ctx) -> ToolResult {
-            return ToolResult::ok("显示器列表", getDisplaysJson());
+            return ToolResult::ok("桌面截图完成", "虚拟显示器截图已捕获 (" + std::to_string(b64.length()) + " 字符)");
         }
     );
 

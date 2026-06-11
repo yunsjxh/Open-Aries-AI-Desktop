@@ -53,7 +53,7 @@ Open Aries AI Desktop 是一款为 Windows 设计的原生桌面 AI 助手。不
 
 - **原生桌面** — 单文件 exe，双击即用，WebView2 DLL 内嵌，不依赖外部 Runtime
 - **多模型兼容** — OpenAI / DeepSeek / SiliconFlow / MiniMax 等全部 OpenAI 格式 API
-- **Agent 自主调用** — AI 可自主读写文件、执行 PowerShell、管理进程、截取窗口/桌面等 20 个系统工具
+- **Agent 自主调用** — AI 可自主读写文件、执行 PowerShell、管理进程、截取窗口/桌面等 19 个系统工具
 - **MCP 协议扩展** — 支持 Model Context Protocol stdio 传输，接入外部工具服务器
 - **流式 SSE 输出** — 实时显示 AI 推理过程和回复，支持 `<think>` 思考链展示
 - **视觉识别** — 截图分析，多模态请求（需视觉模型支持）
@@ -65,7 +65,7 @@ Open Aries AI Desktop 是一款为 Windows 设计的原生桌面 AI 助手。不
 - **路径安全** — 文件操作白名单 + 黑名单校验，防路径遍历
 - **自适应窗口** — 四边四角自由拖动调整大小，最小宽度 480px
 
-### Agent 工具（20 个）
+### Agent 工具（19 个）
 
 | 工具 | 功能 | 需确认 |
 |------|------|--------|
@@ -85,8 +85,7 @@ Open Aries AI Desktop 是一款为 Windows 设计的原生桌面 AI 助手。不
 | `GET_FOREGROUND_WINDOW` | 获取前台窗口信息 | — |
 | `LIST_WINDOWS` | 列出所有可见窗口 | — |
 | `CAPTURE_WINDOW` | 截取窗口画面 | — |
-| `CAPTURE_DESKTOP` | 截取指定显示器画面（DXGI） | — |
-| `GET_DISPLAYS` | 获取所有显示器信息 | — |
+| `CAPTURE_DESKTOP` | 截取 usbmmidd_v2 虚拟显示器画面（DXGI） | — |
 | `CLICK_AT` | 在屏幕坐标点击 | — |
 | `MOVE_WINDOW_TO_DISPLAY` | 移动窗口到指定显示器 | — |
 
